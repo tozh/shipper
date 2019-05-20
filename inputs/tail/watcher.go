@@ -54,7 +54,7 @@ func (w *Watcher) Run() {
 }
 
 func (w *Watcher) Done() {
-	w.done <- true
+	w.done <- struct{}{}
 	w.watcher.Close()
 }
 

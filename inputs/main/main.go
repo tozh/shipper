@@ -7,7 +7,7 @@ import (
 
 func main() {
 	w := tail.NewWatcher()
-	err := w.Add("/Users/tzhao/ship-test/foo2.txt")
+	err := w.Add("/Users/tzhao/ship-test/")
 	if err != nil {
 		log.Panic(err)
 	}

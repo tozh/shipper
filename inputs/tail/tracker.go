@@ -13,6 +13,7 @@ type FileTracker struct {
 	filename string
 	file     *os.File
 	fileInfo os.FileInfo
+	reader   io.Reader
 	config   FileTrackerConfig
 	watcher  *fsnotify.Watcher
 	bus      chan message.Message
@@ -48,20 +49,22 @@ func (ft *FileTracker) poll() {
 
 func (ft *FileTracker) init() error {
 	var err error
+	// open file
 	ft.file, err = os.Open(ft.filename)
 	if err != nil {
 		return err
 	}
+	// check file stat
 	ft.fileInfo, err = os.Stat(ft.filename)
 	if err != nil {
 		return err
 	}
-
+	// check if read from start (seek to the end)
 	if !ft.config.readFromStart {
 		n, err := ft.file.Seek(0, io.SeekEnd)
 		log.Debugf("seek to the end, result: %d, error: %v\n", n, err)
 	}
-
+	// new watcher and add file
 	ft.watcher, err = fsnotify.NewWatcher()
 	if err != nil {
 		return err
