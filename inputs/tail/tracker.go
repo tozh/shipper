@@ -16,6 +16,7 @@ type FileTracker struct {
 	reader   io.Reader
 	config   FileTrackerConfig
 	watcher  *fsnotify.Watcher
+	offset   int64
 	bus      chan message.Message
 	notify   chan fsnotify.Event
 	done     chan struct{}

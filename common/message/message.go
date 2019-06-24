@@ -4,11 +4,13 @@ import "time"
 
 type Message interface {
 	//SetTimestamp(t time.Time)
-	Timestamp() time.Time
 	//SetLevel(level int)
+	//SetBytes(bytes []byte)
+
+	Timestamp() time.Time
 	Level() int
-	//SetData(data []byte)
-	Data() []byte
+	Bytes() []byte
+	String() string
 }
 
 

@@ -6,7 +6,7 @@ const DefaultLevelForLine = 3
 
 type Line struct {
 	ts    time.Time
-	data  []byte
+	bytes []byte
 	level int
 }
 
@@ -18,14 +18,18 @@ func (l *Line) Level() int {
 	return l.level
 }
 
-func (l *Line) Data() []byte {
-	return l.data
+func (l *Line) Bytes() []byte {
+	return l.bytes
+}
+
+func (l *Line) String() string {
+	return string(l.bytes)
 }
 
 func NewLine(data []byte, level int) *Line {
 	return &Line{
 		ts:    time.Now(),
-		data:  data,
+		bytes: data,
 		level: level,
 	}
 }
