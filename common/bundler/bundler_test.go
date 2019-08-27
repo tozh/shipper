@@ -12,9 +12,9 @@ import (
 func TestBundlerCount1(t *testing.T) {
 	// Unbundled case: one item per bundle.
 	handler := &testHandler{}
-	b := NewBundler(int(0), handler.handle)
-	b.BundleCountThreshold = 1
-	b.DelayThreshold = time.Second
+	b := NewBundler(handler.handler)
+	b.CountThreshold = 1
+	b.TimeThreshold = time.Second
 
 	for i := 0; i < 3; i++ {
 		if err := b.Add(i, 1); err != nil {
@@ -23,7 +23,7 @@ func TestBundlerCount1(t *testing.T) {
 	}
 	b.Flush()
 	got := handler.bundles()
-	want := [][]int{{0}, {1}, {2}}
+	want := [][]interface{}{{0}, {1}, {2}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("bundles: got %v, want %v", got, want)
 	}
@@ -38,9 +38,9 @@ func TestBundlerCount1(t *testing.T) {
 
 func TestBundlerCount3(t *testing.T) {
 	handler := &testHandler{}
-	b := NewBundler(int(0), handler.handle)
-	b.BundleCountThreshold = 3
-	b.DelayThreshold = 100 * time.Millisecond
+	b := NewBundler(handler.handler)
+	b.CountThreshold = 3
+	b.TimeThreshold = 100 * time.Millisecond
 	// Add 8 items.
 	// The first two bundles of 3 should both be handled quickly.
 	// The third bundle of 2 should not be handled for about DelayThreshold ms.
@@ -49,16 +49,16 @@ func TestBundlerCount3(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	time.Sleep(5 * b.DelayThreshold)
+	time.Sleep(5 * b.TimeThreshold)
 	// We should not need to close the bundler.
 
 	bgot := handler.bundles()
-	bwant := [][]int{{0, 1, 2}, {3, 4, 5}, {6, 7}}
+	bwant := [][]interface{}{{0, 1, 2}, {3, 4, 5}, {6, 7}}
 	if !reflect.DeepEqual(bgot, bwant) {
 		t.Errorf("bundles: got %v, want %v", bgot, bwant)
 	}
 
-	tgot := quantizeTimes(handler.times(), b.DelayThreshold)
+	tgot := quantizeTimes(handler.times(), b.TimeThreshold)
 	if len(tgot) != 3 || tgot[0] != 0 || tgot[1] != 0 || tgot[2] == 0 {
 		t.Errorf("times: got %v, want [0, 0, non-zero]", tgot)
 	}
@@ -66,9 +66,9 @@ func TestBundlerCount3(t *testing.T) {
 
 func TestBundlerByteThreshold(t *testing.T) {
 	handler := &testHandler{}
-	b := NewBundler(int(0), handler.handle)
-	b.BundleCountThreshold = 10
-	b.BundleByteThreshold = 3
+	b := NewBundler(handler.handler)
+	b.CountThreshold = 10
+	b.SizeThreshold = 3
 	add := func(i interface{}, s int) {
 		if err := b.Add(i, s); err != nil {
 			t.Fatal(err)
@@ -85,11 +85,11 @@ func TestBundlerByteThreshold(t *testing.T) {
 	add(6, 1)
 	b.Flush()
 	bgot := handler.bundles()
-	bwant := [][]int{{1, 2}, {3, 4, 5}, {6}}
+	bwant := [][]interface{}{{1, 2}, {3, 4, 5}, {6}}
 	if !reflect.DeepEqual(bgot, bwant) {
 		t.Errorf("bundles: got %v, want %v", bgot, bwant)
 	}
-	tgot := quantizeTimes(handler.times(), b.DelayThreshold)
+	tgot := quantizeTimes(handler.times(), b.TimeThreshold)
 	twant := []int{0, 0, 0}
 	if !reflect.DeepEqual(tgot, twant) {
 		t.Errorf("times: got %v, want %v", tgot, twant)
@@ -98,9 +98,9 @@ func TestBundlerByteThreshold(t *testing.T) {
 
 func TestBundlerLimit(t *testing.T) {
 	handler := &testHandler{}
-	b := NewBundler(int(0), handler.handle)
-	b.BundleCountThreshold = 10
-	b.BundleByteLimit = 3
+	b := NewBundler(handler.handler)
+	b.CountThreshold = 10
+	b.BundleSizeLimit = 3
 	add := func(i interface{}, s int) {
 		if err := b.Add(i, s); err != nil {
 			t.Fatal(err)
@@ -118,11 +118,11 @@ func TestBundlerLimit(t *testing.T) {
 	// Exceeded byte limit: bundle = 5
 	b.Flush()
 	bgot := handler.bundles()
-	bwant := [][]int{{1, 2}, {3, 4}, {5}, {6}}
+	bwant := [][]interface{}{{1, 2}, {3, 4}, {5}, {6}}
 	if !reflect.DeepEqual(bgot, bwant) {
 		t.Errorf("bundles: got %v, want %v", bgot, bwant)
 	}
-	tgot := quantizeTimes(handler.times(), b.DelayThreshold)
+	tgot := quantizeTimes(handler.times(), b.TimeThreshold)
 	twant := []int{0, 0, 0, 0}
 	if !reflect.DeepEqual(tgot, twant) {
 		t.Errorf("times: got %v, want %v", tgot, twant)
@@ -131,22 +131,22 @@ func TestBundlerLimit(t *testing.T) {
 
 func TestAddWait(t *testing.T) {
 	var (
-		mu     sync.Mutex
+		mutex4t     sync.Mutex
 		events []string
 	)
 	event := func(s string) {
-		mu.Lock()
+		mutex4t.Lock()
 		events = append(events, s)
-		mu.Unlock()
+		mutex4t.Unlock()
 	}
 
 	handlec := make(chan int)
 	done := make(chan struct{})
-	b := NewBundler(int(0), func(interface{}) {
+	b := NewBundler(func([]interface{}) {
 		<-handlec
-		event("handle")
+		event("handler")
 	})
-	b.BufferedByteLimit = 3
+	b.BufferSizeLimit = 3
 	addw := func(sz int) {
 		if err := b.AddWait(context.Background(), 0, sz); err != nil {
 			t.Fatal(err)
@@ -161,21 +161,21 @@ func TestAddWait(t *testing.T) {
 	}()
 	// Give addw(3) a chance to finish
 	time.Sleep(100 * time.Millisecond)
-	handlec <- 1 // handle the first bundle
+	handlec <- 1 // handler the first bundle
 	select {
 	case <-time.After(time.Second):
 		t.Fatal("timed out")
 	case <-done:
 	}
-	want := []string{"addw(2)", "handle", "addw(3)"}
+	want := []string{"addw(2)", "handler", "addw(3)"}
 	if !reflect.DeepEqual(events, want) {
 		t.Errorf("got  %v\nwant%v", events, want)
 	}
 }
 
 func TestAddWaitCancel(t *testing.T) {
-	b := NewBundler(int(0), func(interface{}) {})
-	b.BufferedByteLimit = 3
+	b := NewBundler(func([]interface{}) {})
+	b.BufferSizeLimit = 3
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
 		time.Sleep(100 * time.Millisecond)
@@ -190,11 +190,11 @@ func TestAddWaitCancel(t *testing.T) {
 func TestBundlerErrors(t *testing.T) {
 	// Use a handler that blocks forever, to force the bundler to run out of
 	// memory.
-	b := NewBundler(int(0), func(interface{}) { select {} })
-	b.BundleByteLimit = 3
-	b.BufferedByteLimit = 10
+	b := NewBundler(func([]interface{}) { select {} })
+	b.BundleSizeLimit = 3
+	b.BufferSizeLimit = 10
 
-	if got, want := b.Add(1, 4), ErrOversizedItem; got != want {
+	if got, want := b.Add(1, 4), ErrOversize; got != want {
 		t.Fatalf("got %v, want %v", got, want)
 	}
 
@@ -212,12 +212,12 @@ func TestBundlerErrors(t *testing.T) {
 func TestConcurrentHandlersMax(t *testing.T) {
 	const handlerLimit = 10
 	var (
-		mu          sync.Mutex
+		mutex4t          sync.Mutex
 		active      int
 		maxHandlers int
 	)
-	b := NewBundler(int(0), func(s interface{}) {
-		mu.Lock()
+	b := NewBundler(func(s []interface{}) {
+		mutex4t.Lock()
 		active++
 		if active > maxHandlers {
 			maxHandlers = active
@@ -225,21 +225,21 @@ func TestConcurrentHandlersMax(t *testing.T) {
 		if maxHandlers > handlerLimit {
 			t.Errorf("too many handlers running (got %d; want %d)", maxHandlers, handlerLimit)
 		}
-		mu.Unlock()
+		mutex4t.Unlock()
 		time.Sleep(1 * time.Millisecond) // let the scheduler work
-		mu.Lock()
+		mutex4t.Lock()
 		active--
-		mu.Unlock()
+		mutex4t.Unlock()
 	})
-	b.BundleCountThreshold = 5
+	b.CountThreshold = 5
 	b.HandlerLimit = 10
 	defer b.Flush()
 
 	more := 0 // extra iterations past saturation
 	for i := 0; more == 0 || i < more; i++ {
-		mu.Lock()
+		mutex4t.Lock()
 		m := maxHandlers
-		mu.Unlock()
+		mutex4t.Unlock()
 		if m >= handlerLimit && more == 0 {
 			// Run past saturation to check that we don't exceed the max.
 			more = 2 * i
@@ -251,18 +251,18 @@ func TestConcurrentHandlersMax(t *testing.T) {
 // Check that Flush doesn't return until all prior items have been handled.
 func TestConcurrentFlush(t *testing.T) {
 	var (
-		mu    sync.Mutex
+		mutex4t    sync.Mutex
 		items = make(map[int]bool)
 	)
-	b := NewBundler(int(0), func(s interface{}) {
-		mu.Lock()
-		for _, i := range s.([]int) {
-			items[i] = true
+	b := NewBundler(func(s []interface{}) {
+		mutex4t.Lock()
+		for _, i := range s {
+			items[i.(int)] = true
 		}
-		mu.Unlock()
+		mutex4t.Unlock()
 		time.Sleep(10 * time.Millisecond)
 	})
-	b.BundleCountThreshold = 5
+	b.CountThreshold = 5
 	b.HandlerLimit = 10
 	defer b.Flush()
 
@@ -276,8 +276,8 @@ func TestConcurrentFlush(t *testing.T) {
 			go func() {
 				defer wg.Done()
 				b.Flush()
-				mu.Lock()
-				defer mu.Unlock()
+				mutex4t.Lock()
+				defer mutex4t.Unlock()
 				for j := 0; j <= i; j++ {
 					if !items[j] {
 						// Cannot use Fatal, since we're in a non-test goroutine.
@@ -292,11 +292,11 @@ func TestConcurrentFlush(t *testing.T) {
 
 type testHandler struct {
 	mu sync.Mutex
-	b  [][]int
+	b  [][]interface{}
 	t  []time.Time
 }
 
-func (t *testHandler) bundles() [][]int {
+func (t *testHandler) bundles() [][]interface{} {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.b
@@ -308,10 +308,10 @@ func (t *testHandler) times() []time.Time {
 	return t.t
 }
 
-func (t *testHandler) handle(b interface{}) {
+func (t *testHandler) handler(b []interface{}) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.b = append(t.b, b.([]int))
+	t.b = append(t.b, b)
 	t.t = append(t.t, time.Now())
 }
 

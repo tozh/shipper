@@ -4,13 +4,14 @@ import (
 	"context"
 	"errors"
 	"golang.org/x/sync/semaphore"
+	"math"
 	"sync"
 	"time"
 )
 
 const (
 	DefaultTimeThreshold   = time.Second
-	DefaultCountTreshold   = 10
+	DefaultCountThreshold  = 10
 	DefaultSizeThreshold   = 1e6 // 1M
 	DefaultBundleSizeLimit = 1e7 // 10M
 	DefaultBufferSizeLimit = 1e9 // 1G
@@ -21,10 +22,6 @@ var (
 	ErrOverflow = errors.New("bundler exceeds buffer size limit")
 )
 
-type Item interface {
-	Size() int
-}
-
 type Bundler struct {
 	TimeThreshold  time.Duration
 	CountThreshold int
@@ -34,63 +31,74 @@ type Bundler struct {
 	BufferSizeLimit int
 	HandlerLimit    int
 
-	ticket    *Ticket
-	handle    func([]Item)
-	items     []Item
-	itemsZero []Item
-	size      int
+	handler func([]interface{})
 
+	bundle     []interface{}
+	size       int
+	bundleZero []interface{}
+
+	// for timer
+	timerInitOnce sync.Once
 	timer         *time.Timer
-	timerInitOnce *sync.Once
 	timerRunning  bool
 	timerCancel   chan struct{}
 
-	mutex       *sync.Mutex
+	mutex       sync.Mutex
+	semInitOnce sync.Once
 	sem         *semaphore.Weighted
-	semInitOnce *sync.Once
+
+	// for ticket
+	mutex4t     sync.Mutex
+	cond4t      *sync.Cond
+	active      map[uint64]struct{}
+	next        uint64
+	nextHandled uint64
 }
 
-func (b *Bundler) initSemaphore() {
+// only initial semaphore once.
+func (b *Bundler) initSemOnce() {
 	b.semInitOnce.Do(func() {
 		b.sem = semaphore.NewWeighted(int64(b.BufferSizeLimit))
 	})
 }
 
-func (b *Bundler) initTimer() {
+// only initial timer once.
+func (b *Bundler) initTimerOnce() {
 	b.timerInitOnce.Do(func() {
 		b.timer = time.NewTimer(b.TimeThreshold)
 	})
 }
 
-// flushLocked should call with b.mutex locked
-func (b *Bundler) flushLocked() {
-	// cancel the timer function -- Flush()
-	if b.timerRunning {
-		// make sure b.timer has been initialized.
-		// it can only be initialed once.
-		b.initTimer()
-		b.timer.Stop()
-		// if b.timerRunning, means there is a gorountine is waiting for the timerCancel.
-		b.timerCancel <- struct{}{}
-		b.timerRunning = false
+// if buffer is full, Add() will return ErrOverflow error
+func (b *Bundler) Add(item interface{}, size int) error {
+	if b.BundleSizeLimit > 0 && size > b.BundleSizeLimit {
+		return ErrOversize
 	}
-	if len(b.items) == 0 {
-		return
+	b.initSemOnce()
+	if !b.sem.TryAcquire(int64(size)) {
+		return ErrOverflow
 	}
-	// clear items
-	items := b.items
-	b.items = b.itemsZero
-	size := b.size
-	b.size = 0
-	ti := b.ticket.Next()
-	go func() {
-		defer func() {
-			b.sem.Release(int64(size))
-			b.ticket.Release(ti)
-		}()
-		b.ticket.Acquire(ti)
-		b.handle(items)
-	}()
+	b.add(item, size)
+	return nil
+}
+
+// if buffer is full, AddWait() will wait semaphore to release
+// AddWait blocks until space is available or ctx is done.
+// Calls to Add and AddWait should not be mixed on the same Bundler.
+func (b *Bundler) AddWait(ctx context.Context, item interface{}, size int) error {
+	if b.BundleSizeLimit > 0 && size > b.BundleSizeLimit {
+		return ErrOversize
+	}
+	b.initSemOnce()
+
+	// wait until got semaphore.
+	// semaphore Acquire() is FIFO. there is no starvation in race condition.
+	err := b.sem.Acquire(ctx, int64(size))
+	if err != nil {
+		return err
+	}
+	b.add(item, size)
+	return nil
 }
 
 func (b *Bundler) Flush() {
@@ -99,30 +107,30 @@ func (b *Bundler) Flush() {
 	b.mutex.Unlock()
 
 	// all tickets < ti are either finished or active.
-	ti := b.ticket.WhatIsNext()
-	b.initSemaphore()
-	// wait all those tickets < ti.
-	b.ticket.WaitAll(ti)
+	t := b.next
+	b.initSemOnce()
+	// wait all those tickets < t.
+	b.waitAll(t)
 }
 
-func (b *Bundler) add(item Item) {
+func (b *Bundler) add(item interface{}, size int) {
 	b.mutex.Lock()
 	defer b.mutex.Unlock()
 
 	// if adding the item exceed the bundle size limit, need flushLocked the current bundle.
-	if b.BundleSizeLimit > 0 && b.size+item.Size() > b.BundleSizeLimit {
+	if b.BundleSizeLimit > 0 && b.size+size > b.BundleSizeLimit {
 		b.flushLocked()
 	}
 
 	// add item
-	b.items = append(b.items, item)
-	b.size += item.Size()
+	b.bundle = append(b.bundle, item)
+	b.size += size
 
-	// set timer to call Flush
+	// set timer to call Flush()
 	if !b.timerRunning {
 		// make sure b.timer has been initialized.
 		// it can only be initialed once.
-		b.initTimer()
+		b.initTimerOnce()
 		b.timer.Reset(b.TimeThreshold)
 		b.timerRunning = true
 		go func() {
@@ -134,12 +142,11 @@ func (b *Bundler) add(item Item) {
 				// waiting has no damage to throughput.
 				b.Flush()
 			case <-b.timerCancel:
-
 			}
 		}()
 	}
 
-	if len(b.items) >= b.CountThreshold {
+	if len(b.bundle) == b.CountThreshold {
 		b.flushLocked()
 	}
 
@@ -148,52 +155,105 @@ func (b *Bundler) add(item Item) {
 	}
 }
 
-// if buffer is full, TryAdd() will return ErrOverflow error
-func (b *Bundler) TryAdd(item Item) error {
-	if b.BundleSizeLimit > 0 && item.Size() > b.BundleSizeLimit {
-		return ErrOversize
+// flushLocked should call with b.mutex locked
+func (b *Bundler) flushLocked() {
+	// stop timer
+	if b.timerRunning {
+		// don't need to initialize timer. b.timerRunning makes sure timer has been initialized
+
+		// if stopped by calling Stop()
+		// it means the timer hasn't been triggered and a gorountine is waiting for timerCancel.
+		if b.timer.Stop() {
+			b.timerCancel <- struct{}{}
+		}
+		b.timerRunning = false
 	}
-	b.initSemaphore()
-	if !b.sem.TryAcquire(int64(item.Size())) {
-		return ErrOverflow
+	if len(b.bundle) == 0 {
+		return
 	}
-	b.add(item)
-	return nil
+	// copy and clear bundle
+	bundle := b.bundle
+	b.bundle = b.bundleZero
+	size := b.size
+	b.size = 0
+	ticket := b.next
+	b.next++
+	go func() {
+		defer func() {
+			b.sem.Release(int64(size))
+			b.release(ticket)
+		}()
+		b.acquire(ticket)
+		b.handler(bundle)
+	}()
 }
 
-// if buffer is full, Add() will wait semaphore to release
-func (b *Bundler) Add(ctx context.Context, item Item) error {
-	if b.BundleSizeLimit > 0 && item.Size() > b.BundleSizeLimit {
-		return ErrOversize
-	}
-	b.initSemaphore()
+func (b *Bundler) acquire(ticket uint64) {
+	b.mutex4t.Lock()
+	defer b.mutex4t.Unlock()
 
-	// wait until got semaphore.
-	// semaphore Acquire() is FIFO. there is no starvation in race condition.
-	err := b.sem.Acquire(ctx, int64(item.Size()))
-	if err != nil {
-		return err
+	if ticket < b.nextHandled {
+		panic("ticket: acquire: ticket arg too small")
 	}
-	b.add(item)
-	return nil
+	for !(ticket == b.nextHandled && len(b.active) < b.HandlerLimit) {
+		b.cond4t.Wait()
+	}
+	b.active[ticket] = struct{}{}
+	b.nextHandled++
+	b.cond4t.Broadcast()
 }
 
-func NewBundler(handle func([]Item)) *Bundler {
+func (b *Bundler) release(ticket uint64) {
+	b.mutex4t.Lock()
+	defer b.mutex4t.Unlock()
+
+	_, in := b.active[ticket]
+	if !in {
+		panic("ticket: release: not an active ticket")
+	}
+	delete(b.active, ticket)
+	b.cond4t.Broadcast()
+}
+
+func (b *Bundler) waitAll(n uint64) {
+	b.mutex4t.Lock()
+	defer b.mutex4t.Unlock()
+
+	for !(b.nextHandled >= n && n <= min(b.active)) {
+		b.cond4t.Wait()
+	}
+}
+
+// min returns the minimum value of the set s, or the largest uint64 if
+// s is empty.
+func min(s map[uint64]struct{}) uint64 {
+	var m uint64 = math.MaxUint64
+	for n := range s {
+		if n < m {
+			m = n
+		}
+	}
+	return m
+}
+
+func NewBundler(handler func([]interface{})) *Bundler {
 	b := &Bundler{
 		TimeThreshold:   DefaultTimeThreshold,
-		CountThreshold:  DefaultCountTreshold,
+		CountThreshold:  DefaultCountThreshold,
 		SizeThreshold:   DefaultSizeThreshold,
 		BundleSizeLimit: DefaultBundleSizeLimit,
 		BufferSizeLimit: DefaultBufferSizeLimit,
 		HandlerLimit:    1,
-		handle:          handle,
-		itemsZero:       make([]Item, 0, (DefaultCountTreshold+1)>>1),
-		timerInitOnce:   &sync.Once{},
+		handler:         handler,
+		timerInitOnce:   sync.Once{},
+		bundleZero:      make([]interface{}, 0),
 		timerCancel:     make(chan struct{}),
-		mutex:           &sync.Mutex{},
-		sem:             nil,
-		semInitOnce:     &sync.Once{},
+		mutex:           sync.Mutex{},
+		semInitOnce:     sync.Once{},
+		mutex4t:         sync.Mutex{},
+		active:          make(map[uint64]struct{}),
 	}
-	b.items = b.itemsZero
+	b.cond4t = sync.NewCond(&b.mutex4t)
+	b.bundle = b.bundleZero
 	return b
 }
